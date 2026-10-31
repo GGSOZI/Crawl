@@ -1,0 +1,497 @@
+if _G.__DuaCrouchCrawl then
+	pcall(_G.__DuaCrouchCrawl)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+local StarterGui = game:GetService("StarterGui")
+local LocalPlayer = Players.LocalPlayer
+local CONFIG = {
+	StandTop = 5.2, -- only used for the "is there room to stand up" check
+	FadeTime = 0.1,
+	Debug = false, -- prints what's happening to the output (F9 console) and shows a notification when you toggle
+	Order = { "Crawl" },
+	Poses = {
+		Crawl = {
+			Title = "Crawl",
+			Keys = { Enum.KeyCode.Z, Enum.KeyCode.ButtonR3 },
+			AnimationId = "rbxassetid://108626498920593",
+			SpeedMultiplier = 0.25,
+			Bottom = 0.25,
+			Height = 1.25, -- fits under a 1.5 stud gap
+			PauseWhenIdle = true, -- crawl animation only moves while you move
+			CameraOffset = Vector3.new(0, 0, 0),
+			TouchPosition = nil,
+		},
+	},
+}
+
+
+local S = {}
+local connections = {}
+
+local function notify(text)
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {
+			Title = "Crawl",
+			Text = text,
+			Duration = 2.5,
+		})
+	end)
+end
+
+local function dbg(text)
+	if CONFIG.Debug then
+		print("[Crawl] " .. text)
+	end
+end
+
+local function actionName(pose)
+	return "DuaKNo_" .. pose
+end
+
+local function refreshButtons()
+	for _, pose in ipairs(CONFIG.Order) do
+		local title = CONFIG.Poses[pose].Title
+		if S.pose == pose then
+			title = "Stand"
+		end
+		pcall(function()
+			ContextActionService:SetTitle(actionName(pose), title)
+		end)
+	end
+end
+
+local function resetState()
+	if S.conn then
+		S.conn:Disconnect()
+	end
+	if S.diedConn then
+		S.diedConn:Disconnect()
+	end
+	S = { tracks = {}, d = 0 }
+end
+
+
+local function capture()
+	local char, hum, hrp = S.char, S.hum, S.hrp
+	if not (char and hum and hrp) then
+		return false
+	end
+
+	local joint
+	for _, m in ipairs(char:GetDescendants()) do
+		if m:IsA("Motor6D") and m.Part0 == hrp then
+			joint = m
+			break
+		end
+	end
+	if not joint then
+		return false
+	end
+
+	-- R6: the legs add to the hip height. R15: HipHeight is already floor -> bottom of the root part.
+	local legOffset = 0
+	if hum.RigType == Enum.HumanoidRigType.R6 then
+		local leg = char:FindFirstChild("Left Leg")
+		legOffset = leg and leg.Size.Y or 2
+	end
+
+	local bottom = hum.HipHeight + legOffset
+	S.joint = joint
+	S.base = {
+		hip = hum.HipHeight,
+		legOffset = legOffset,
+		bottom = bottom,
+		size = hrp.Size,
+		c0 = joint.C0,
+		speed = hum.WalkSpeed,
+		camOff = hum.CameraOffset,
+		jump = hum:GetStateEnabled(Enum.HumanoidStateType.Jumping),
+		scale = (bottom + hrp.Size.Y) / 4, -- 1 for a default character, scales poses for big/small avatars
+		collide = {},
+	}
+	return true
+end
+
+-- (bottom, height) of the collision box for a pose, or for standing when pose == nil
+local function dims(pose)
+	local b = S.base
+	if pose then
+		local cfg = CONFIG.Poses[pose]
+		return cfg.Bottom * b.scale, cfg.Height * b.scale
+	end
+	return b.bottom, b.size.Y
+end
+
+local function top(pose)
+	if pose then
+		local bottom, height = dims(pose)
+		return bottom + height
+	end
+	return CONFIG.StandTop * S.base.scale
+end
+
+
+local function hasRoom(fromTop, toTop)
+	local hrp = S.hrp
+	local curBottom, curHeight = dims(S.pose)
+	local floorY = hrp.Position.Y - (curBottom + curHeight / 2)
+	local h = toTop - fromTop
+	if h <= 0 then
+		return true
+	end
+
+	local center = CFrame.new(hrp.Position.X, floorY + fromTop + h / 2, hrp.Position.Z)
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { S.char }
+
+	for _, part in ipairs(workspace:GetPartBoundsInBox(center, Vector3.new(1.8, h, 1.8), params)) do
+		if part.CanCollide then
+			return false
+		end
+	end
+	return true
+end
+
+
+local resolved = {}
+local resolving = {}
+local function resolveAnimId(key, raw)
+	resolving[key] = true
+	local id = string.match(raw, "%d+")
+	local ok, result = pcall(function()
+		return game:GetObjects("rbxassetid://" .. tostring(id))
+	end)
+	if ok and result and #result > 0 then
+		if result[1]:IsA("Animation") then
+			resolved[key] = result[1].AnimationId
+		end
+		for _, o in ipairs(result) do
+			pcall(function()
+				o:Destroy()
+			end)
+		end
+	end
+	resolving[key] = nil
+end
+
+-- if you crouch before the lookup above has finished, wait for it (otherwise the raw emote id gets loaded and cached)
+local function awaitResolved(key)
+	local waited = 0
+	while resolving[key] and waited < 8 do
+		waited = waited + task.wait()
+	end
+end
+
+local function getTrack(key, raw, resolveKey)
+	local track = S.tracks[key]
+	if track then
+		return track
+	end
+
+	local animator = S.hum:FindFirstChildOfClass("Animator")
+	if not animator then
+		animator = Instance.new("Animator")
+		animator.Parent = S.hum
+	end
+
+	local anim = Instance.new("Animation")
+	anim.AnimationId = resolved[resolveKey or key] or raw
+
+	local ok, result = pcall(function()
+		return animator:LoadAnimation(anim)
+	end)
+	if not ok or not result then
+		return nil
+	end
+
+	result.Looped = true
+	-- with a separate walk animation the pose sits below it so walking layers on top; otherwise the pose is top priority
+	local poseCfg = CONFIG.Poses[key]
+	if poseCfg and poseCfg.MoveAnimationId then
+		result.Priority = Enum.AnimationPriority.Action3
+	else
+		result.Priority = Enum.AnimationPriority.Action4
+	end
+	S.tracks[key] = result
+	return result
+end
+
+
+local function setPose(target, force)
+	local hum, hrp = S.hum, S.hrp
+	if not (S.char and hum and hrp and hrp.Parent) or hum.Health <= 0 then
+		return
+	end
+	if target == S.pose then
+		return
+	end
+
+	if target then
+		if S.busy then
+			return
+		end
+		S.busy = true
+		local char = S.char
+		awaitResolved(target)
+		awaitResolved(target .. "R6")
+		awaitResolved(target .. "Move")
+		S.busy = false
+		if S.char ~= char or hum.Health <= 0 or target == S.pose then
+			return
+		end
+	end
+
+	if not S.base then
+		if not target then
+			return
+		end
+		if hum.Sit then
+			return
+		end
+		if not capture() then
+			notify("Character isn't ready yet.")
+			return
+		end
+	end
+	local base = S.base
+
+	-- standing up / getting taller: make sure there is space
+	local curTop = top(S.pose)
+	local newTop = top(target)
+	if not force and newTop > curTop and not hasRoom(curTop, newTop) then
+		notify("Not enough room to stand up.")
+		return
+	end
+
+	local cfg = target and CONFIG.Poses[target]
+	local newBottom, newHeight = base.bottom, base.size.Y
+	if target then
+		newBottom, newHeight = dims(target)
+	end
+
+	-- how far the collision box center moves down, and how far the visuals have to be raised to cancel it
+	local d = (base.bottom + base.size.Y / 2) - (newBottom + newHeight / 2)
+	local delta = d - S.d
+
+	hrp.Size = Vector3.new(base.size.X, newHeight, base.size.Z)
+	hum.HipHeight = newBottom - base.legOffset
+	S.joint.C0 = CFrame.new(0, d, 0) * base.c0
+	hrp.CFrame = hrp.CFrame - Vector3.new(0, delta, 0)
+	S.d = d
+
+	-- stats
+	if cfg then
+		hum.WalkSpeed = base.speed * cfg.SpeedMultiplier
+		hum.CameraOffset = base.camOff + cfg.CameraOffset
+		hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false)
+	else
+		hum.WalkSpeed = base.speed
+		hum.CameraOffset = base.camOff
+		hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, base.jump)
+	end
+
+	-- animation
+	if S.pose then
+		for _, key in ipairs({ S.pose, S.pose .. "Move" }) do
+			if S.tracks[key] then
+				S.tracks[key]:Stop(CONFIG.FadeTime)
+			end
+		end
+	end
+	S.moving = false
+	S.moveWarned = false
+	S.poseStart = os.clock()
+	if target then
+		if cfg.MoveAnimationId then
+			getTrack(target .. "Move", cfg.MoveAnimationId)
+		end
+		local useR6 = hum.RigType == Enum.HumanoidRigType.R6 and cfg.AnimationIdR6 ~= nil
+		local animRaw = useR6 and cfg.AnimationIdR6 or cfg.AnimationId
+		local track = getTrack(target, animRaw, useR6 and (target .. "R6") or target)
+		if track then
+			-- start frozen if you're not moving, so it doesn't crawl in place
+			local startSpeed = (cfg.PauseWhenIdle and hum.MoveDirection.Magnitude <= 0.1) and 0 or 1
+			track:Play(CONFIG.FadeTime, 1, startSpeed)
+			local char = S.char
+			task.delay(3, function()
+				if S.char == char and S.pose == target then
+					dbg(("%s track: id=%s length=%.2f playing=%s"):format(target, track.Animation and track.Animation.AnimationId or "?", track.Length, tostring(track.IsPlaying)))
+				end
+				if S.char == char and S.pose == target and track.Length == 0 then
+					-- normal load failed: try Roblox's own emote player (works for catalog emotes)
+					track:Stop(0)
+					local emoteId = tonumber(string.match(animRaw, "%d+"))
+					local ok, played, emoteTrack = pcall(function()
+						return hum:PlayEmoteAndGetAnimTrackById(emoteId)
+					end)
+					if ok and played and emoteTrack then
+						emoteTrack.Looped = true
+						emoteTrack.Priority = Enum.AnimationPriority.Action3
+						S.tracks[target] = emoteTrack
+					else
+						warn("[Crawl] animation " .. animRaw .. " did not load - not usable in this game.")
+						notify(cfg.Title .. " animation didn't load (ID not usable here).")
+					end
+				end
+			end)
+		end
+	end
+
+	-- collision enforcement loop
+	if target and not S.conn then
+		S.conn = RunService.Stepped:Connect(function()
+			local char, h = S.char, S.hum
+			if not (char and char.Parent and h and S.base) then
+				return
+			end
+
+			for _, p in ipairs(char:GetDescendants()) do
+				if p:IsA("BasePart") and p ~= S.hrp and p.CanCollide then
+					if S.base.collide[p] == nil then
+						S.base.collide[p] = true
+					end
+					p.CanCollide = false
+				end
+			end
+
+			local pose = S.pose
+			local pcfg = pose and CONFIG.Poses[pose]
+			local track = pose and S.tracks[pose]
+			if pcfg and pcfg.PauseWhenIdle and track then
+				track:AdjustSpeed(h.MoveDirection.Magnitude > 0.1 and 1 or 0)
+			end
+
+			-- idle pose while standing still, move animation while walking
+			-- watchdog: if the game (or anything else) stops the pose track, start it again
+			if track and track.Length > 0 and not track.IsPlaying then
+				track:Play(CONFIG.FadeTime, 1, 1)
+			end
+
+			-- the pose keeps playing the whole time; the move animation layers on top while walking
+			local moveTrack = pose and S.tracks[pose .. "Move"]
+			if moveTrack then
+				local moving = h.MoveDirection.Magnitude > 0.1
+				if moveTrack.Length == 0 then
+					if moving and not S.moveWarned then
+						S.moveWarned = true
+						warn("[Crawl] move animation did not load - not usable in this game.")
+						notify("Walk animation didn't load (ID not usable here).")
+					end
+				elseif moving ~= S.moving or (moving and not moveTrack.IsPlaying) then
+					S.moving = moving
+					if moving then
+						moveTrack:Play(CONFIG.FadeTime, 1, 1)
+					else
+						moveTrack:Stop(CONFIG.FadeTime)
+					end
+				end
+			end
+		end)
+	elseif not target then
+		if S.conn then
+			S.conn:Disconnect()
+			S.conn = nil
+		end
+		for part, original in pairs(base.collide) do
+			if part.Parent then
+				part.CanCollide = original
+			end
+		end
+		S.base = nil
+		S.joint = nil
+		S.d = 0
+	end
+
+	S.pose = target
+end
+
+local function toggle(pose)
+	if S.pose == pose then
+		setPose(nil)
+	else
+		setPose(pose)
+	end
+	refreshButtons()
+	if CONFIG.Debug then
+		dbg("toggle " .. pose .. " -> pose is now " .. tostring(S.pose))
+		notify(S.pose and (S.pose .. " on") or "Standing")
+	end
+end
+
+----------------------------------------------------------------------
+-- CHARACTER LIFECYCLE
+----------------------------------------------------------------------
+local function onCharacter(char)
+	resetState()
+	S.char = char
+
+	local hum = char:WaitForChild("Humanoid", 10)
+	local hrp = char:WaitForChild("HumanoidRootPart", 10)
+	if not (hum and hrp) or S.char ~= char then
+		return
+	end
+
+	S.hum = hum
+	S.hrp = hrp
+	S.diedConn = hum.Died:Connect(function()
+		if S.conn then
+			S.conn:Disconnect()
+			S.conn = nil
+		end
+	end)
+	refreshButtons()
+end
+
+----------------------------------------------------------------------
+-- BIND THE BUTTONS (ContextActionService = Roblox's own button system)
+----------------------------------------------------------------------
+resetState()
+
+for _, pose in ipairs(CONFIG.Order) do
+	local cfg = CONFIG.Poses[pose]
+	local name = actionName(pose)
+
+	ContextActionService:UnbindAction(name)
+	ContextActionService:BindAction(name, function(_, inputState)
+		if inputState == Enum.UserInputState.Begin then
+			toggle(pose)
+		end
+		return Enum.ContextActionResult.Sink
+	end, true, table.unpack(cfg.Keys))
+
+	ContextActionService:SetTitle(name, cfg.Title)
+	task.spawn(resolveAnimId, pose, cfg.AnimationId)
+	if cfg.AnimationIdR6 then
+		task.spawn(resolveAnimId, pose .. "R6", cfg.AnimationIdR6)
+	end
+	if cfg.MoveAnimationId then
+		task.spawn(resolveAnimId, pose .. "Move", cfg.MoveAnimationId)
+	end
+	if cfg.TouchPosition then
+		ContextActionService:SetPosition(name, cfg.TouchPosition)
+	end
+end
+
+table.insert(connections, LocalPlayer.CharacterAdded:Connect(onCharacter))
+if LocalPlayer.Character then
+	task.spawn(onCharacter, LocalPlayer.Character)
+end
+
+-- cleanup hook, used when the script is executed again
+_G.__DuaCrouchCrawl = function()
+	pcall(function()
+		setPose(nil, true)
+	end)
+	for _, pose in ipairs(CONFIG.Order) do
+		ContextActionService:UnbindAction(actionName(pose))
+	end
+	for _, c in ipairs(connections) do
+		c:Disconnect()
+	end
+	resetState()
+	_G.__DuaCrouchCrawl = nil
+end
