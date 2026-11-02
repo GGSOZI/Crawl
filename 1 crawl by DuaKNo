@@ -4,7 +4,7 @@ end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local ContextActionService = game:GetService("ContextActionService")
+local UserInputService = game:GetService("UserInputService")
 local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 local CONFIG = {
@@ -15,14 +15,13 @@ local CONFIG = {
 	Poses = {
 		Crawl = {
 			Title = "Crawl",
-			Keys = { Enum.KeyCode.Z, Enum.KeyCode.ButtonR3 },
+			Keys = { Enum.KeyCode.Z, Enum.KeyCode.ButtonR3 }, -- hotkeys still work next to the tool
 			AnimationId = "rbxassetid://108626498920593",
 			SpeedMultiplier = 0.25,
 			Bottom = 0.25,
 			Height = 1.25, -- fits under a 1.5 stud gap
 			PauseWhenIdle = true, -- crawl animation only moves while you move
 			CameraOffset = Vector3.new(0, 0, 0),
-			TouchPosition = nil,
 		},
 	},
 }
@@ -30,6 +29,7 @@ local CONFIG = {
 
 local S = {}
 local connections = {}
+local tools = {}
 
 local function notify(text)
 	pcall(function()
@@ -47,19 +47,13 @@ local function dbg(text)
 	end
 end
 
-local function actionName(pose)
-	return "DuaKNo_" .. pose
-end
-
+-- the tool's name in the hotbar flips between the pose title and "Stand"
 local function refreshButtons()
 	for _, pose in ipairs(CONFIG.Order) do
-		local title = CONFIG.Poses[pose].Title
-		if S.pose == pose then
-			title = "Stand"
+		local t = tools[pose]
+		if t and t.Parent then
+			t.Name = (S.pose == pose) and "Stand" or CONFIG.Poses[pose].Title
 		end
-		pcall(function()
-			ContextActionService:SetTitle(actionName(pose), title)
-		end)
 	end
 end
 
@@ -423,6 +417,30 @@ local function toggle(pose)
 end
 
 ----------------------------------------------------------------------
+-- THE TOOL (equip it, then click to toggle)
+----------------------------------------------------------------------
+local function giveTools()
+	task.wait()
+	local backpack = LocalPlayer:WaitForChild("Backpack")
+	for _, pose in ipairs(CONFIG.Order) do
+		if tools[pose] then
+			tools[pose]:Destroy()
+		end
+		local t = Instance.new("Tool")
+		t.Name = CONFIG.Poses[pose].Title
+		t.ToolTip = "Click to toggle " .. CONFIG.Poses[pose].Title:lower()
+		t.RequiresHandle = false
+		t.CanBeDropped = false
+		t.Activated:Connect(function()
+			toggle(pose)
+		end)
+		t.Parent = backpack
+		tools[pose] = t
+	end
+	refreshButtons()
+end
+
+----------------------------------------------------------------------
 -- CHARACTER LIFECYCLE
 ----------------------------------------------------------------------
 local function onCharacter(char)
@@ -443,27 +461,16 @@ local function onCharacter(char)
 			S.conn = nil
 		end
 	end)
-	refreshButtons()
+	giveTools()
 end
 
 ----------------------------------------------------------------------
--- BIND THE BUTTONS (ContextActionService = Roblox's own button system)
+-- START
 ----------------------------------------------------------------------
 resetState()
 
 for _, pose in ipairs(CONFIG.Order) do
 	local cfg = CONFIG.Poses[pose]
-	local name = actionName(pose)
-
-	ContextActionService:UnbindAction(name)
-	ContextActionService:BindAction(name, function(_, inputState)
-		if inputState == Enum.UserInputState.Begin then
-			toggle(pose)
-		end
-		return Enum.ContextActionResult.Sink
-	end, true, table.unpack(cfg.Keys))
-
-	ContextActionService:SetTitle(name, cfg.Title)
 	task.spawn(resolveAnimId, pose, cfg.AnimationId)
 	if cfg.AnimationIdR6 then
 		task.spawn(resolveAnimId, pose .. "R6", cfg.AnimationIdR6)
@@ -471,10 +478,22 @@ for _, pose in ipairs(CONFIG.Order) do
 	if cfg.MoveAnimationId then
 		task.spawn(resolveAnimId, pose .. "Move", cfg.MoveAnimationId)
 	end
-	if cfg.TouchPosition then
-		ContextActionService:SetPosition(name, cfg.TouchPosition)
-	end
 end
+
+-- optional hotkeys (Z / R3) next to the tool
+table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then
+		return
+	end
+	for _, pose in ipairs(CONFIG.Order) do
+		for _, key in ipairs(CONFIG.Poses[pose].Keys) do
+			if input.KeyCode == key then
+				toggle(pose)
+				return
+			end
+		end
+	end
+end))
 
 table.insert(connections, LocalPlayer.CharacterAdded:Connect(onCharacter))
 if LocalPlayer.Character then
@@ -486,9 +505,12 @@ _G.__DuaCrouchCrawl = function()
 	pcall(function()
 		setPose(nil, true)
 	end)
-	for _, pose in ipairs(CONFIG.Order) do
-		ContextActionService:UnbindAction(actionName(pose))
+	for _, t in pairs(tools) do
+		pcall(function()
+			t:Destroy()
+		end)
 	end
+	tools = {}
 	for _, c in ipairs(connections) do
 		c:Disconnect()
 	end
