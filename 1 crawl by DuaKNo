@@ -8,28 +8,28 @@ local UserInputService = game:GetService("UserInputService")
 local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 local CONFIG = {
-	StandTop = 5.2, -- only used for the "is there room to stand up" check
+	StandTop = 5.2,
 	FadeTime = 0.1,
-	Debug = false, -- prints what's happening to the output (F9 console) and shows a notification when you toggle
+	Debug = false,
 	Order = { "Crawl" },
 	Poses = {
 		Crawl = {
 			Title = "Crawl",
-			Keys = { Enum.KeyCode.Z, Enum.KeyCode.ButtonR3 }, -- hotkeys still work next to the tool
+			Keys = { Enum.KeyCode.Z, Enum.KeyCode.ButtonR3 },
 			AnimationId = "rbxassetid://108626498920593",
 			SpeedMultiplier = 0.25,
 			Bottom = 0.25,
-			Height = 1.25, -- fits under a 1.5 stud gap
-			PauseWhenIdle = true, -- crawl animation only moves while you move
+			Height = 1.25,
+			PauseWhenIdle = true,
 			CameraOffset = Vector3.new(0, 0, 0),
 		},
 	},
 }
 
-
 local S = {}
 local connections = {}
 local tools = {}
+local alive = true
 
 local function notify(text)
 	pcall(function()
@@ -47,7 +47,6 @@ local function dbg(text)
 	end
 end
 
--- the tool's name in the hotbar flips between the pose title and "Stand"
 local function refreshButtons()
 	for _, pose in ipairs(CONFIG.Order) do
 		local t = tools[pose]
@@ -67,7 +66,6 @@ local function resetState()
 	S = { tracks = {}, d = 0 }
 end
 
-
 local function capture()
 	local char, hum, hrp = S.char, S.hum, S.hrp
 	if not (char and hum and hrp) then
@@ -85,7 +83,6 @@ local function capture()
 		return false
 	end
 
-	-- R6: the legs add to the hip height. R15: HipHeight is already floor -> bottom of the root part.
 	local legOffset = 0
 	if hum.RigType == Enum.HumanoidRigType.R6 then
 		local leg = char:FindFirstChild("Left Leg")
@@ -103,13 +100,12 @@ local function capture()
 		speed = hum.WalkSpeed,
 		camOff = hum.CameraOffset,
 		jump = hum:GetStateEnabled(Enum.HumanoidStateType.Jumping),
-		scale = (bottom + hrp.Size.Y) / 4, -- 1 for a default character, scales poses for big/small avatars
+		scale = (bottom + hrp.Size.Y) / 4,
 		collide = {},
 	}
 	return true
 end
 
--- (bottom, height) of the collision box for a pose, or for standing when pose == nil
 local function dims(pose)
 	local b = S.base
 	if pose then
@@ -126,7 +122,6 @@ local function top(pose)
 	end
 	return CONFIG.StandTop * S.base.scale
 end
-
 
 local function hasRoom(fromTop, toTop)
 	local hrp = S.hrp
@@ -150,7 +145,6 @@ local function hasRoom(fromTop, toTop)
 	return true
 end
 
-
 local resolved = {}
 local resolving = {}
 local function resolveAnimId(key, raw)
@@ -172,7 +166,6 @@ local function resolveAnimId(key, raw)
 	resolving[key] = nil
 end
 
--- if you crouch before the lookup above has finished, wait for it (otherwise the raw emote id gets loaded and cached)
 local function awaitResolved(key)
 	local waited = 0
 	while resolving[key] and waited < 8 do
@@ -203,7 +196,6 @@ local function getTrack(key, raw, resolveKey)
 	end
 
 	result.Looped = true
-	-- with a separate walk animation the pose sits below it so walking layers on top; otherwise the pose is top priority
 	local poseCfg = CONFIG.Poses[key]
 	if poseCfg and poseCfg.MoveAnimationId then
 		result.Priority = Enum.AnimationPriority.Action3
@@ -213,7 +205,6 @@ local function getTrack(key, raw, resolveKey)
 	S.tracks[key] = result
 	return result
 end
-
 
 local function setPose(target, force)
 	local hum, hrp = S.hum, S.hrp
@@ -253,7 +244,6 @@ local function setPose(target, force)
 	end
 	local base = S.base
 
-	-- standing up / getting taller: make sure there is space
 	local curTop = top(S.pose)
 	local newTop = top(target)
 	if not force and newTop > curTop and not hasRoom(curTop, newTop) then
@@ -267,7 +257,6 @@ local function setPose(target, force)
 		newBottom, newHeight = dims(target)
 	end
 
-	-- how far the collision box center moves down, and how far the visuals have to be raised to cancel it
 	local d = (base.bottom + base.size.Y / 2) - (newBottom + newHeight / 2)
 	local delta = d - S.d
 
@@ -277,7 +266,6 @@ local function setPose(target, force)
 	hrp.CFrame = hrp.CFrame - Vector3.new(0, delta, 0)
 	S.d = d
 
-	-- stats
 	if cfg then
 		hum.WalkSpeed = base.speed * cfg.SpeedMultiplier
 		hum.CameraOffset = base.camOff + cfg.CameraOffset
@@ -288,7 +276,6 @@ local function setPose(target, force)
 		hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, base.jump)
 	end
 
-	-- animation
 	if S.pose then
 		for _, key in ipairs({ S.pose, S.pose .. "Move" }) do
 			if S.tracks[key] then
@@ -307,7 +294,6 @@ local function setPose(target, force)
 		local animRaw = useR6 and cfg.AnimationIdR6 or cfg.AnimationId
 		local track = getTrack(target, animRaw, useR6 and (target .. "R6") or target)
 		if track then
-			-- start frozen if you're not moving, so it doesn't crawl in place
 			local startSpeed = (cfg.PauseWhenIdle and hum.MoveDirection.Magnitude <= 0.1) and 0 or 1
 			track:Play(CONFIG.FadeTime, 1, startSpeed)
 			local char = S.char
@@ -316,7 +302,6 @@ local function setPose(target, force)
 					dbg(("%s track: id=%s length=%.2f playing=%s"):format(target, track.Animation and track.Animation.AnimationId or "?", track.Length, tostring(track.IsPlaying)))
 				end
 				if S.char == char and S.pose == target and track.Length == 0 then
-					-- normal load failed: try Roblox's own emote player (works for catalog emotes)
 					track:Stop(0)
 					local emoteId = tonumber(string.match(animRaw, "%d+"))
 					local ok, played, emoteTrack = pcall(function()
@@ -335,7 +320,6 @@ local function setPose(target, force)
 		end
 	end
 
-	-- collision enforcement loop
 	if target and not S.conn then
 		S.conn = RunService.Stepped:Connect(function()
 			local char, h = S.char, S.hum
@@ -359,13 +343,10 @@ local function setPose(target, force)
 				track:AdjustSpeed(h.MoveDirection.Magnitude > 0.1 and 1 or 0)
 			end
 
-			-- idle pose while standing still, move animation while walking
-			-- watchdog: if the game (or anything else) stops the pose track, start it again
 			if track and track.Length > 0 and not track.IsPlaying then
 				track:Play(CONFIG.FadeTime, 1, 1)
 			end
 
-			-- the pose keeps playing the whole time; the move animation layers on top while walking
 			local moveTrack = pose and S.tracks[pose .. "Move"]
 			if moveTrack then
 				local moving = h.MoveDirection.Magnitude > 0.1
@@ -416,33 +397,40 @@ local function toggle(pose)
 	end
 end
 
-----------------------------------------------------------------------
--- THE TOOL (equip it, then click to toggle)
-----------------------------------------------------------------------
-local function giveTools()
-	task.wait()
-	local backpack = LocalPlayer:WaitForChild("Backpack")
+local function makeTool(pose)
+	local t = Instance.new("Tool")
+	t.Name = CONFIG.Poses[pose].Title
+	t.ToolTip = "Click to toggle " .. CONFIG.Poses[pose].Title:lower()
+	t.RequiresHandle = false
+	t.CanBeDropped = false
+	t.Activated:Connect(function()
+		toggle(pose)
+	end)
+	return t
+end
+
+local function ensureTools()
+	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+	if not backpack then
+		return
+	end
 	for _, pose in ipairs(CONFIG.Order) do
-		if tools[pose] then
-			tools[pose]:Destroy()
+		local t = tools[pose]
+		local ok = t and t.Parent and (t.Parent == backpack or t.Parent == LocalPlayer.Character)
+		if not ok then
+			if t then
+				pcall(function()
+					t:Destroy()
+				end)
+			end
+			t = makeTool(pose)
+			t.Parent = backpack
+			tools[pose] = t
 		end
-		local t = Instance.new("Tool")
-		t.Name = CONFIG.Poses[pose].Title
-		t.ToolTip = "Click to toggle " .. CONFIG.Poses[pose].Title:lower()
-		t.RequiresHandle = false
-		t.CanBeDropped = false
-		t.Activated:Connect(function()
-			toggle(pose)
-		end)
-		t.Parent = backpack
-		tools[pose] = t
 	end
 	refreshButtons()
 end
 
-----------------------------------------------------------------------
--- CHARACTER LIFECYCLE
-----------------------------------------------------------------------
 local function onCharacter(char)
 	resetState()
 	S.char = char
@@ -461,13 +449,14 @@ local function onCharacter(char)
 			S.conn = nil
 		end
 	end)
-	giveTools()
+	refreshButtons()
 end
 
-----------------------------------------------------------------------
--- START
-----------------------------------------------------------------------
 resetState()
+
+pcall(function()
+	StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, true)
+end)
 
 for _, pose in ipairs(CONFIG.Order) do
 	local cfg = CONFIG.Poses[pose]
@@ -480,7 +469,6 @@ for _, pose in ipairs(CONFIG.Order) do
 	end
 end
 
--- optional hotkeys (Z / R3) next to the tool
 table.insert(connections, UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then
 		return
@@ -500,8 +488,15 @@ if LocalPlayer.Character then
 	task.spawn(onCharacter, LocalPlayer.Character)
 end
 
--- cleanup hook, used when the script is executed again
+task.spawn(function()
+	while alive do
+		pcall(ensureTools)
+		task.wait(0.5)
+	end
+end)
+
 _G.__DuaCrouchCrawl = function()
+	alive = false
 	pcall(function()
 		setPose(nil, true)
 	end)
