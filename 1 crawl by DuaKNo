@@ -238,7 +238,6 @@ local function setPose(target, force)
 			return
 		end
 		if not capture() then
-			notify("Character isn't ready yet.")
 			return
 		end
 	end
